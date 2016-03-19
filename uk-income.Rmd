@@ -1,0 +1,384 @@
+---
+title: "Modeling UK quarterly Income "
+author: "Andrea Schioppa"
+output:
+  html_document:
+    keep_md: yes
+---
+
+## Synopsis
+
+We use the data set income.dta available from [Verbeek's data sets](http://bcs.wiley.com/he-bcs/Books?action=resource&bcsId=7080&itemId=1119951674&resourceId=27088) (Chapter 8), which contains UK quarterly
+income (in millions of pounds and current prices) for the terms 1971:I to 1985:II
+($T = 58$), to illustrate the choice of an ARIMA model.
+
+## Loading the data and creating a plot
+We load the data and plot the income after transforming it by $\log$.
+```{r libraries, echo = TRUE}
+library(foreign)
+library(ggplot2)
+library(scales)
+library(zoo)
+library(forecast)
+```
+
+```{r load_plot, echo = TRUE}
+income <- read.dta('../income.dta')
+
+# plot 
+p <- ggplot(income, aes(x=time, y=log(income))) + geom_line()
+p <- p + labs(x = 'Quarter', y ='log(income)')
+p
+```
+The graph suggests either a trend or a unit root. We run an AR(1) Dickey-Fuller test: the
+null hypothesis is the presence of a unit root, the statistic is computed like a $t$-statistic, but
+the distribution is special; at the same significance level for a $z$-test, the values for rejection
+are more extreme. We test both with and without a time trend.
+
+```{r DF_1, echo = TRUE}
+# Fit an AR(1) to run the Dickey-Fuller test
+ts <- with(income, zoo(log(income), time))
+ar_df <- arima(ts, order = c(1,0,0))
+
+ar_df
+
+# Dickey-Fuller, needs a special table
+# on 58 observations we fail to reject the unit root
+DFstat <- (ar_df$coef[1]-1)/sqrt(ar_df$var.coef[1,1]) # -0.7080838
+
+DFstat
+
+# Redo with a time trend : again fail to reject the unit root
+ar_dfTrend <- arima(ts, order = c(1, 0, 0), xreg = income$time)
+DFstatTrend <- (ar_dfTrend$coef[1]-1)/sqrt(ar_dfTrend$var.coef[1,1]) # -1.2706
+
+DFstatTrend 
+```
+
+Both with an without a time trend we fail to reject the presence of a unit root.
+
+
+## Augmented Dickey-Fuller
+
+The test might be incorrect because we fail to specify the autoregression correctly.
+We thus run Augmented Dickey-Fuller tests up to order AR(6). We have implemented both the
+version with the time trend and without.
+
+```{r DF_general, echo = TRUE}
+#################################################
+# b : Augmented Dickey-Fuller tests up to AR(6) #
+#################################################
+
+# lags a vector; helper to lagged_Matrix;
+# R standard lag gave some issues
+lagged_vector <- function(x, lag = 1) {
+    N = length(x)
+    return(c(rep(0, lag), x[-c((N-lag+1):N)]))
+}
+
+
+# construct a matrix with lags
+lagged_Matrix <- function(x, lags) {
+    out <- matrix(0, nrow = length(x), ncol = lags+1)
+    colnames(out) <- paste('lag', 0:lags, sep = '')
+
+    out[,'lag0'] <- x
+
+    j = 1
+    while(j <= lags) {
+        out[, paste('lag', j, sep = '')] <- lagged_vector(x, j)
+        j <- j + 1
+    }
+
+    out
+}
+
+# performs multiple Augmented DF tests
+augmentedDF <- function(tser, lags, trend = FALSE) {
+    
+    # convert tser to numeric
+    tsnum <- as.numeric(tser)
+    diffts <- tsnum[-1] - tsnum[-length(tsnum)]
+    
+    # construct dimensions
+    lagmat.dim <- ifelse(trend, lags + 3, lags + 2)
+    T <- length(diffts)
+
+    # construct lagmat = matrix with lags for fitting
+    lagmat <- matrix(0, nrow = T, ncol = lagmat.dim)
+    lagged <- lagged_Matrix(diffts, lags = lags)
+
+    if(trend) { # 'extvar' is the variable we're interested in 
+        # 'trend' is the time trend
+        lagmat[,-c((lagmat.dim-1):lagmat.dim)] <- lagged
+        colnames(lagmat) <- c('DepVar', colnames(lagged)[-1],'extvar', 'trend')
+    } else {
+        lagmat[,-c(lagmat.dim)] <- lagged
+        colnames(lagmat) <- c('DepVar', colnames(lagged)[-1], 'extvar')
+    }
+
+    lagmat[, 'extvar'] <- tsnum[-T]
+    if(trend) lagmat[, 'trend'] <- index(tser)[-1]
+
+    lagmat <- as.data.frame(lagmat)
+
+    # output vector
+    out <- rep(0, lags+1)
+    names(out) <- paste('AugDF(', c(0:lags), ')', sep = '')
+    if(trend) trendout <- out 
+    # output matrix
+    for(j in c(0:lags)) {
+        # construct model formula
+        strmod <-'DepVar ~ '
+        start.row <- 1 # row where to start the fitting
+
+        if(j >= 1) {
+            start.row <- start.row + j
+            strmod <- paste(strmod, paste(colnames(lagmat)[2:(j+1)], collapse = ' + '))
+        }
+        
+        strmod <- paste(strmod, 'extvar', sep = ' + ')
+        if(trend) strmod <- paste(strmod, 'trend', sep = ' + ')
+
+        # fit and extract statistic; DF is computed like a t-stat, but
+        # has a special distribution
+        model <- lm(as.formula(strmod), data = lagmat[c(start.row:T),])
+        DFstat <- coef(model)['extvar']/sqrt(vcov(model)['extvar', 'extvar'])
+
+        # assign
+        out[j+1] <- DFstat
+
+        if(trend) {
+            TrendStat <- coef(model)['trend']/sqrt(vcov(model)['trend', 'trend'])
+            trendout[j] <- TrendStat
+        }
+    }
+
+    if(trend) {
+        return(list(DF = out, Trend = trendout))
+    } else {
+        return(out)
+    }
+}
+
+ADFstats <- augmentedDF(ts, lags = 6) # fail to reject unit root
+ADFstats
+
+ADFstatsTrend <- augmentedDF(ts, lags = 6, trend = TRUE)[[1]] # fail to reject unit root
+ADFstatsTrend
+
+```
+
+We fail to reject the unit root.
+
+
+## First differences
+We explore if taking first differences removes the unit root. We first create a plot.
+
+```{r diff_plot, echo = TRUE}
+income$diff <- with(income, c(diff(log(income)), 0))
+# plot 
+pdiff <- ggplot(income[-dim(income)[1],], aes(x=time, y=diff)) + geom_line()
+pdiff <- pdiff + xlab('Quarter') + ylab(expression(Delta * log(income)))
+pdiff 
+```
+We now use the Augmented Dickey-Fuller test. This time we can reject the unit root on the
+differenced process. Note that the time trend does not result statistically significant.
+
+```{r ADF_diff, echo = TRUE}
+IADFstats <- augmentedDF(diff(ts), lags = 6) # In ADF of orders 0 and 1 reject unit root
+IADFstats
+
+IADFstatsTrend <- augmentedDF(diff(ts), lags = 6, trend = TRUE) # time trend not significant
+IADFstatsTrend
+```
+
+
+## Exploratory Analysis on Integrated Differences
+
+We first plot the autocorrelation and partial autocorrelation functions of the first-order
+differences.
+
+```{r diff_acf_plot, echo = TRUE}
+diffts <- diff(ts)
+acf_diffts <- acf(diffts, lag.max = 20) # exclude autocorrelation
+pacf_diffts <- pacf(diffts, lag.max = 20) 
+```
+The pictures suggest trying an ARMA of order(s) $\le 4$. We first try AR(4) and MA(4).
+
+```{r MA(4), echo = TRUE}
+armaModels <- list()
+armaModels[['AR(4)']] <- arima(ts, order = c(4, 1, 0))
+armaModels[['MA(4)']] <- arima(ts, order = c(0, 1, 4))
+armaModels
+
+# Info Matrix
+arma_infcr <- matrix(0, nrow = length(armaModels), ncol = 2)
+rownames(arma_infcr) <- names(armaModels)
+colnames(arma_infcr) <- c('AIC', 'BIC')
+arma_infcr[, 1] <- unlist(sapply(armaModels, `[`, 'aic'))
+arma_infcr[, 2] <- sapply(armaModels, BIC)
+arma_infcr
+```
+Both the BIC and AIC prefer AR(4). We use a Ljung-Box Test for autocorrelation in the residuals. For
+AR(4) we clearly fail to reject the null-hypothesis of autocorrelation. MA(4) is more borderline and
+appears less adequate.
+
+```{r Ljung_Box, echo = TRUE}
+Ljung_Box_Test <- function(x, K) {
+    T <- x$nobs
+    ndf <- K - (length(x$coef) - 1)
+    if(ndf <= 0 || T <= K) return(NA) # can't apply the statistics
+
+    # autocorrelations
+    rk <- acf(x$residuals, lag.max = K, plot = FALSE)
+    rk <- as.numeric(rk$acf)[-1] # first is lag = 0
+    
+    
+    # weights
+    wk <- 1/(T-c(1:K))
+
+    # Q-statistic
+    Q <- T * (T+2) * sum(wk * rk^2)
+
+    return(pchisq(Q, df = ndf, lower.tail = FALSE))
+}
+
+Kvec <- c(6, 12, 18)
+arlj_pvals <- matrix(0, nrow = length(armaModels), ncol = length(Kvec))
+rownames(arlj_pvals) <- names(armaModels)
+colnames(arlj_pvals) <- paste('K =', Kvec)
+
+for(i in 1:length(Kvec)) {
+    arlj_pvals[,i] <- sapply(armaModels, Ljung_Box_Test, K = Kvec[i])
+}
+
+arlj_pvals
+```
+
+## Choice of a model
+We construct a grid of models to choose one.
+
+```{r ARMAmodels, echo = TRUE}
+# fit  models up to ARIMA(5,1,5)
+armaModels <- list()
+# some models will not converge
+errorList <- list()
+warningList <- list()
+for(ari in 0:5) {
+    for(mi in 0:5) {
+        str.name <- paste('ARIMA(', ari, ',1,', mi, ')', sep = '')
+        tryCatch({
+            # when I \ne 0 intercept is not included;
+            # I did not assume a time trend so I will exclude
+            # if you want to include add , xreg = rep(1,length(ts)
+            armaModels[[str.name]] <- arima(ts, order = c(ari,1,mi))
+        }, warning = function(war) {
+            a <- get('warningList', envir = globalenv())
+            a[[str.name]] <- war$message
+            assign('warningList', a, envir = globalenv())#[[str.name]] <- err$message
+           
+            
+        }, error = function(err) {
+            # need to copy from the Global Environment
+            a <- get('errorList', envir = globalenv())
+            a[[str.name]] <- err$message
+            assign('errorList', a, envir = globalenv()) # need to go in the globalenv
+        })
+    }
+}
+
+# Failed only ARIMA(4,1,3)
+errorList
+
+
+armaPvals <- lapply(armaModels, function(x) {
+    if(length(x$coef) == 0) return(NA) # handles the empty model ARIMA(0,1,0)
+    
+    out <- data.frame(z = x$coef/sqrt(diag(x$var.coef)), row.names = names(x$coef))
+    # note: we compute asymmetric ones, with just one tail
+    out$pval = pnorm(abs(out$z), lower.tail=F)
+    
+    out
+})
+armaPvals
+
+# Information Criteria
+arma_infcr <- matrix(0, nrow = length(armaModels), ncol = 2)
+rownames(arma_infcr) <- names(armaModels)
+colnames(arma_infcr) <- c('AIC', 'BIC')
+arma_infcr[, 1] <- unlist(sapply(armaModels, `[`, 'aic'))
+arma_infcr[, 2] <- sapply(armaModels, BIC)
+arma_infcr
+```
+
+AIC chooses ARIMA(5,1,5), BIC ARIMA(4,1,2). AIC is generally less conservative; we now test
+for the presence of common roots. In case of common roots one can choose a more parsimonious model.
+
+```{r croots, echo = TRUE}
+coef1 <- armaModels$`ARIMA(4,1,2)`$coef
+coef2 <- armaModels$`ARIMA(5,1,5)`$coef
+
+# test for common roots
+arcoef1 <- polyroot(c(1, -coef1[1:4]))
+arcoef1
+
+macoef1 <- polyroot(c(1, coef1[5:6]))
+macoef1
+
+arcoef2 <- polyroot(c(1, -coef2[1:5]))
+arcoef2
+
+macoef2 <- polyroot(c(1, coef2[6:10]))
+macoef2
+```
+It seems there might be a possible common root in ARMA(5,1,5) while this does not seem the case in
+ARIMA(4,1,2). We now try to simplify the model looking at nested models in ARIMA(4,1,2).
+
+```{r armaNested, echo = TRUE}
+armaSList <- list()
+armaSList[[1]] <- arima(ts, order = c(4,1,2), fixed = c(0, 0, 0, NA, NA, NA))
+armaSList[[2]] <- arima(ts, order = c(4,1,2), fixed = c(NA, 0, 0, NA, NA, NA), method = 'ML')
+armaSList[[3]] <- arima(ts, order = c(4,1,2), fixed = c(NA, NA, 0, NA, NA, NA), method = 'ML')
+armaSList[[4]] <- arima(ts, order = c(4,1,2), fixed = c(NA, NA, NA, NA, NA, NA))
+armaSList[[5]] <- arima(ts, order = c(4,1,2), fixed = c(NA, NA, NA, NA, 0, NA))
+armaSList[[6]] <- arima(ts, order = c(4,1,2), fixed = c(0, 0, 0, NA, 0, NA))
+# 'ML' needed for convergence issues
+armaSList[[7]] <- arima(ts, order = c(4,1,2), fixed = c(0, 0, NA, NA, 0, NA), method = 'ML')
+armaSList[[8]] <- arima(ts, order = c(4,1,2), fixed = c(NA, 0, 0, NA, 0, NA), method = 'ML')
+
+# Information Criteria
+arma_Sinfcr <- matrix(0, nrow = length(armaSList), ncol = 2)
+rownames(arma_Sinfcr) <- names(armaSList)
+colnames(arma_Sinfcr) <- c('AIC', 'BIC')
+arma_Sinfcr[, 1] <- unlist(sapply(armaSList, `[`, 'aic'))
+arma_Sinfcr[, 2] <- sapply(armaSList, BIC)
+arma_Sinfcr
+
+armaSPvals <- lapply(armaSList, function(x) {
+    if(length(x$coef) == 0) return(NA) # handles the empty model ARIMA(0,1,0)
+
+    # when models are constrained coef has more coefficients
+    out <- data.frame(z = x$coef[colnames(x$var.coef)]/sqrt(diag(x$var.coef)), row.names = names(x$var.coef))
+    # note: we compute asymmetric ones, with just one tail
+    out$pval = pnorm(abs(out$z), lower.tail=F)
+    
+    out
+})
+armaSPvals
+```
+
+Both AIC and BIC suggest model 6. We test for serial correlation in the residuals and fail to
+reject.
+
+```{r LjFinal, echo = TRUE}
+armaSList[[6]]
+Ljung_Box_Test(armaSList[[6]], K=10)
+```
+
+We finally use the model to predict the next two terms.
+
+```{r pred, echo = TRUE}
+next.terms <- predict(armaSList[[6]], n.ahead = 2)
+next.terms
+```
